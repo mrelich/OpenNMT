@@ -183,6 +183,8 @@ function Saver:saveEpoch(validPpl, epochState)
   _G.logger:info('Saving checkpoint to \'' .. filePath .. '\'...')
 
   self:_save(filePath, info)
+
+  return filePath
 end
 
 return Saver

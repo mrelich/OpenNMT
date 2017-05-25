@@ -64,6 +64,22 @@ local options = {
       valid = onmt.utils.ExtendedCmdLine.isUInt(),
       train_state = true
     }
+  },
+  {
+    '-valoutput', 'valid_output',
+    [[This is the output file for the validation translated sentences.]]
+  },
+  {
+    '-valinput', '',
+    [[This is the output file for the validation translated sentences. It will run only when the model
+      is saved at the epoch stage.]]
+  },
+  {
+    '-val_batch_size', 30,
+    [[Validation batch size for translation]],
+    {
+      valid = onmt.utils.ExtendedCmdLine.isUInt()
+    }
   }
 }
 
@@ -139,6 +155,75 @@ function Trainer:eval(data)
   self.model:training()
 
   return math.exp(loss / totalWords)
+end
+
+-- Adding ability to translate a validation set for keeping
+-- track of how things are going.  Sometimes perplexity is not
+-- as clear as looking at actual output.  
+-- TODO: expand cmd options to balance translate option
+function Trainer:translate(model_name, epoch)
+  -- Get the options for the translator
+  local cmd = onmt.utils.ExtendedCmdLine.new() 
+  onmt.translate.Translator.declareOpts(cmd)
+
+  -- Specify the model to be the one saved after epoch
+  local temp = {}
+  temp[1] = '-model'
+  temp[2] = model_name
+  opt = cmd:parse(temp)
+  local translator = onmt.translate.Translator.new(opt)
+
+  -- Build the reader based on whatever validation input we want to use
+  local srcReader  = onmt.utils.FileReader.new(self.args.valinput, false, translator:srcFeat())
+
+  -- Specify the output file
+  outname = self.args.valoutput .. '_' .. epoch 
+  local outfile    = io.open(outname,'w')
+
+  -- Everything below this line is a slimmed version of what is found
+  -- in translate.lua
+  srcBatch   = {}
+  srcIdBatch = {}
+
+  while true do
+    local srcSeq, srcSeqId = srcReader:next()
+
+    if srcSeq ~= nil then
+      table.insert(srcBatch, translator:buildInput(srcSeq))
+      table.insert(srcIdBatch, srcSeqId)
+    elseif #srcBatch == 0 then
+      break
+    end
+
+    if srcSeq == nil or #srcBatch == self.args.val_batch_size then
+      local results = translator:translate(srcBatch, nil)
+
+      for b = 1, #results do
+
+        -- Check for empty output
+        if (srcBatch[b].words and #srcBatch[b].words == 0) then
+          outfile:write('\n')
+        else
+          for n = 1, #results[b].preds do
+
+            local sentence = translator:buildOutput(results[b].preds[n])
+            outfile:write(sentence .. '\n')
+
+          end
+        end
+      end
+
+      if srcSeq == nil then
+        break
+      end
+
+      srcBatch = {}
+      srcIdBatch = {}
+      collectgarbage()
+    end
+  end
+
+  outfile:close()
 end
 
 function Trainer:trainEpoch(data, epoch, startIteration, batchOrder)
@@ -388,8 +473,13 @@ function Trainer:train(trainData, validData, trainStates)
 
     unsavedEpochs = unsavedEpochs + 1
     if unsavedEpochs == self.args.save_every_epochs then
-      self.saver:saveEpoch(validPpl, epochState)
+      path_to_model = self.saver:saveEpoch(validPpl, epochState)
       unsavedEpochs = 0
+      if self.args.valinput ~= '' then
+        _G.logger:info('Start validation translation...')
+        self:translate(path_to_model, epoch)
+        _G.logger:info('...Finished validation translation')
+      end
     end
 
     -- Early stopping?
